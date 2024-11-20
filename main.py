@@ -96,7 +96,6 @@ def serial_thread(port: str, sleep_time: int, data_queue: queue.Queue) -> None:
         while not STOP_EVENT.is_set():
             data = ser.read_all()
             data_queue.put(data)  # Add data to the queue
-            ser.flush()
             time.sleep(sleep_time / 1000)
 
     except serial.SerialException as e:
@@ -115,6 +114,8 @@ def main() -> None:
     dt = datetime.now()
     dt_fmt = dt.strftime("%Y-%m-%d_%H-%M-%S")  # format
     filename = f"UtenteX_Gruppo21_{dt_fmt}"
+
+    subprocess.run("mkdir -p data", shell=True, stdout=subprocess.PIPE)
 
     file_raw = open(f"./data/{filename}_RAW.txt", "w")
     file_data = open(f"./data/{filename}.txt", "w")
@@ -177,7 +178,7 @@ def main() -> None:
                     dt_now_date = dt_now.strftime("%Y-%m-%d")
                     dt_now_tod = dt_now.strftime("%H:%M")
                     file_data.write(f"{trigger:-8d} {dt_now_date} {dt_now_tod}:{
-                        dt_now.second + milli:3.3f} {rh_raw} {t_raw} {rh:.3f} {t:.3f}\n")
+                        (dt_now.second + (milli/1000)):3.3f} {rh_raw} {t_raw} {rh:.3f} {t:.3f}\n")
 
                     buf = buf[idx + PACKET_SIZE:]
                 else:
