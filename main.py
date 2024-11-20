@@ -1,12 +1,20 @@
 #! /usr/bin/python3
 
+import os
 import argparse
 import serial
 from serial import Serial
 from serial import EIGHTBITS, PARITY_NONE, STOPBITS_ONE
 import time
 from datetime import datetime
+import subprocess
 
+import threading
+import queue
+
+DATA_QUEUE = queue.Queue()
+SERIAL_OPEN = False
+STOP_EVENT = threading.Event()  # Global stop signal
 
 PACKET_SIZE = 6
 
@@ -67,24 +75,42 @@ def parse_arguments():
     args = parser.parse_args()
     return args
 
+def serial_thread(port: str, sleep_time: int, data_queue: queue.Queue) -> None:
+    global SERIAL_OPEN
+    try:
+        ser = serial.Serial(port=port, baudrate=115200, bytesize=EIGHTBITS,
+                            parity=PARITY_NONE, stopbits=STOPBITS_ONE)
+        while not ser.isOpen():
+            print("Port was not opened correctly. Retrying...")
+            ser.close()
+            ser.open()
+        print("Port opened correctly")
+
+        SERIAL_OPEN = True
+
+        time.sleep(2)
+
+        subprocess.run("cat -v < /dev/ttyUSB0", shell=True, stdout=subprocess.PIPE)
+        print(f"Buffer cleared on {port}")
+
+        while not STOP_EVENT.is_set():
+            data = ser.read_all()
+            data_queue.put(data)  # Add data to the queue
+            ser.flush()
+            time.sleep(sleep_time / 1000)
+
+    except serial.SerialException as e:
+        print(f"Serial exception: {e}")
+    finally:
+        SERIAL_OPEN = False
+        ser.close()
+
 
 def main() -> None:
     args = parse_arguments()
     hours = args.hours
     port = args.port
     sleep_time = args.sleep
-
-    ser = serial.Serial(port=port, baudrate=115200, bytesize=EIGHTBITS,
-                        parity=PARITY_NONE, stopbits=STOPBITS_ONE)
-    while not ser.isOpen():
-        print("Port was not opened correctly. Retrying...")
-        ser.close()
-        ser.open()
-    print("Port opened correctly")
-
-    for _ in range(10):
-        ser.flush()
-        reset_arduino(ser)
 
     dt = datetime.now()
     dt_fmt = dt.strftime("%Y-%m-%d_%H-%M-%S")  # format
@@ -104,47 +130,67 @@ def main() -> None:
     start = time.time()
     now = start
     max_seconds = hours * 3600
-    while now - start < max_seconds:
-        count += 1
-        data = ser.read_all()
-        now = time.time()
 
-        dt_now = datetime.now()
-        dt_now_fmt = dt_now.strftime("%H:%M:%S.%f")[:-3]  # format
-        print(f"[{dt_now_fmt}] - got {len(data)} bytes: {data.hex()}")
-        file_raw.write(f"{dt_now_fmt} {count} {data.hex()}\n")
+    thread_serial = threading.Thread(
+        target=serial_thread, args=(port, sleep_time, DATA_QUEUE))
 
-        buf += data
-        while len(buf) >= PACKET_SIZE:
-            idx = buf.find(header)
-            if idx == -1:
-                buf = buf[-(header_size - 1)]
-                break
-            elif len(buf) - idx >= PACKET_SIZE:
-                trigger += 1
+    try:
+        while now - start < max_seconds:
+            if not SERIAL_OPEN:
+                thread_serial.start()
 
-                rh_raw = int.from_bytes(buf[idx + 2: idx + 4], byteorder="big")
-                t_raw = int.from_bytes(buf[idx + 4: idx + 6], byteorder="big")
+            count += 1
 
-                t = convert_temp(t_raw)
-                rh = convert_rh(rh_raw, t)
+            # Redundant time calculation
+            now = time.time()
+            dt_now = datetime.now()
+            dt_now_fmt = dt_now.strftime("%H:%M:%S.%f")[:-3]  # format
 
-                quotient = int(len(buf) / PACKET_SIZE)
-                milli = (dt_now.microsecond / 1000) - \
-                    sleep_time + (sleep_time / quotient)
-                dt_now_date = dt_now.strftime("%Y-%m-%d")
-                dt_now_tod = dt_now.strftime("%H:%M")
-                file_data.write(f"{trigger:-8d} {dt_now_date} {dt_now_tod}:{
-                    dt_now.second + milli:3.3f} {rh_raw} {t_raw} {rh:.3f} {t:.3f}\n")
+            try:
+                data = DATA_QUEUE.get(timeout=2 * sleep_time / 1000)
+            except queue.Empty:
+                print(f"[{dt_now_fmt}] - No data received.")
+                continue
 
-                buf = buf[idx + PACKET_SIZE:]
-            else:
-                break
-        time.sleep(sleep_time / 1000)
+            buf += data
+            print(f"[{dt_now_fmt}] - got {len(data)} bytes: {data.hex()}")
+            file_raw.write(f"{dt_now_fmt} {count} {data.hex()}\n")
 
-    ser.close()
-    file_raw.close()
-    file_data.close()
+            while len(buf) >= PACKET_SIZE:
+                idx = buf.find(header)
+                if idx == -1:
+                    break
+                elif len(buf) - idx >= PACKET_SIZE:
+                    trigger += 1
+
+                    rh_raw = int.from_bytes(
+                        buf[idx + 2: idx + 4], byteorder="big")
+                    t_raw = int.from_bytes(
+                        buf[idx + 4: idx + 6], byteorder="big")
+
+                    t = convert_temp(t_raw)
+                    rh = convert_rh(rh_raw, t)
+
+                    quotient = int(len(buf) / PACKET_SIZE)
+                    milli = (dt_now.microsecond / 1000) - \
+                        sleep_time + (sleep_time / quotient)
+                    dt_now_date = dt_now.strftime("%Y-%m-%d")
+                    dt_now_tod = dt_now.strftime("%H:%M")
+                    file_data.write(f"{trigger:-8d} {dt_now_date} {dt_now_tod}:{
+                        dt_now.second + milli:3.3f} {rh_raw} {t_raw} {rh:.3f} {t:.3f}\n")
+
+                    buf = buf[idx + PACKET_SIZE:]
+                else:
+                    break
+    except KeyboardInterrupt:
+        print("Interrupted by user.")
+    finally:
+        STOP_EVENT.set()
+        if SERIAL_OPEN:
+            thread_serial.join()
+
+        file_raw.close()
+        file_data.close()
 
 
 if __name__ == "__main__":
