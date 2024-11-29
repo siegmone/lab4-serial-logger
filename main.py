@@ -148,7 +148,7 @@ def main() -> None:
             dt_now_fmt = dt_now.strftime("%H:%M:%S.%f")[:-3]  # format
 
             try:
-                data = DATA_QUEUE.get(timeout=2 * sleep_time / 1000)
+                data = DATA_QUEUE.get(timeout=10 * sleep_time / 1000)
             except queue.Empty:
                 print(f"[{dt_now_fmt}] - No data received.")
                 continue
@@ -177,7 +177,7 @@ def main() -> None:
                         sleep_time + (sleep_time / quotient)
                     dt_now_date = dt_now.strftime("%Y-%m-%d")
                     dt_now_tod = dt_now.strftime("%H:%M")
-                    file_data.write(f"{trigger:-8d} {dt_now_date} {dt_now_tod}:{
+                    file_data.write(f"{trigger:8d} {dt_now_date} {dt_now_tod}:{
                         (dt_now.second + (milli/1000)):3.3f} {rh_raw} {t_raw} {rh:.3f} {t:.3f}\n")
 
                     buf = buf[idx + PACKET_SIZE:]
