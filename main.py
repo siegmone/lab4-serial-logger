@@ -1,5 +1,6 @@
 #! /usr/bin/python3
 
+import sys
 import os
 import argparse
 import serial
@@ -80,29 +81,26 @@ def serial_thread(port: str, sleep_time: int, data_queue: queue.Queue) -> None:
     try:
         ser = serial.Serial(port=port, baudrate=115200, bytesize=EIGHTBITS,
                             parity=PARITY_NONE, stopbits=STOPBITS_ONE)
-        while not ser.isOpen():
-            print("Port was not opened correctly. Retrying...")
-            ser.close()
-            ser.open()
-        print("Port opened correctly")
-
-        SERIAL_OPEN = True
+        if ser.isOpen():
+            SERIAL_OPEN = True
+            print("Port opened correctly")
 
         time.sleep(2)
 
-        subprocess.run("cat -v < /dev/ttyUSB0", shell=True, stdout=subprocess.PIPE)
+        subprocess.run(f"cat -v < {port}", shell=True, stdout=subprocess.PIPE)
         print(f"Buffer cleared on {port}")
 
         while not STOP_EVENT.is_set():
             data = ser.read_all()
             data_queue.put(data)  # Add data to the queue
             time.sleep(sleep_time / 1000)
+        ser.close()
 
-    except serial.SerialException as e:
+    except Exception as e:
         print(f"Serial exception: {e}")
     finally:
         SERIAL_OPEN = False
-        ser.close()
+        sys.exit(1)
 
 
 def main() -> None:
@@ -137,8 +135,13 @@ def main() -> None:
 
     try:
         while now - start < max_seconds:
-            if not SERIAL_OPEN:
+            if thread_serial is None or not thread_serial.is_alive():
+                # Create a new thread instance every time it needs to be restarted
+                thread_serial = threading.Thread(
+                    target=serial_thread, args=(port, sleep_time, DATA_QUEUE))
                 thread_serial.start()
+                start = time.time()
+                now = start
 
             count += 1
 
@@ -187,9 +190,9 @@ def main() -> None:
         print("Interrupted by user.")
     finally:
         STOP_EVENT.set()
-        if SERIAL_OPEN:
-            thread_serial.join()
 
+        if thread_serial is not None:
+            thread_serial.join()
         file_raw.close()
         file_data.close()
 
