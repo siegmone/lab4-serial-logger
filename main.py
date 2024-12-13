@@ -20,6 +20,17 @@ STOP_EVENT = threading.Event()  # Global stop signal
 PACKET_SIZE = 6
 
 
+def find_header(buf: bytes, header: bytes) -> int:
+    idx = buf.find(header)
+    while buf[idx + len(header)] == header[-1]:
+        idx = buf.find(header, idx + 1)
+        if idx + len(header) >= len(buf):
+            break
+        if idx == -1:
+            break
+    return idx
+
+
 def convert_rh(rh_raw, temp) -> float:
     c1 = -2.0468
     c2 = 0.0367
@@ -76,6 +87,7 @@ def parse_arguments():
     args = parser.parse_args()
     return args
 
+
 def serial_thread(port: str, sleep_time: int, data_queue: queue.Queue) -> None:
     global SERIAL_OPEN
     try:
@@ -87,8 +99,8 @@ def serial_thread(port: str, sleep_time: int, data_queue: queue.Queue) -> None:
 
         time.sleep(2)
 
-        subprocess.run(f"cat -v < {port}", shell=True, stdout=subprocess.PIPE)
-        print(f"Buffer cleared on {port}")
+        # subprocess.run(f"cat -v < {port}", shell=True, stdout=subprocess.PIPE)
+        # print(f"Buffer cleared on {port}")
 
         while not STOP_EVENT.is_set():
             data = ser.read_all()
@@ -161,7 +173,7 @@ def main() -> None:
             file_raw.write(f"{dt_now_fmt} {count} {data.hex()}\n")
 
             while len(buf) >= PACKET_SIZE:
-                idx = buf.find(header)
+                idx = find_header(buf, header)
                 if idx == -1:
                     break
                 elif len(buf) - idx >= PACKET_SIZE:
@@ -181,7 +193,7 @@ def main() -> None:
                     dt_now_date = dt_now.strftime("%Y-%m-%d")
                     dt_now_tod = dt_now.strftime("%H:%M")
                     file_data.write(f"{trigger:8d} {dt_now_date} {dt_now_tod}:{
-                        (dt_now.second + (milli/1000)):3.3f} {rh_raw} {t_raw} {rh:.3f} {t:.3f}\n")
+                        (dt_now.second + (milli / 1000)):3.3f} {rh_raw} {t_raw} {rh:.3f} {t:.3f}\n")
 
                     buf = buf[idx + PACKET_SIZE:]
                 else:
