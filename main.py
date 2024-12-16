@@ -1,11 +1,9 @@
-#! /usr/bin/python3
+#! /bin/python3
 
 import sys
 import os
 import argparse
-import serial
-from serial import Serial
-from serial import EIGHTBITS, PARITY_NONE, STOPBITS_ONE
+from serial import Serial, EIGHTBITS, PARITY_NONE, STOPBITS_ONE
 import time
 from datetime import datetime
 import subprocess
@@ -14,14 +12,53 @@ import threading
 import queue
 
 DATA_QUEUE = queue.Queue()
-SERIAL_OPEN = False
 STOP_EVENT = threading.Event()  # Global stop signal
 
 PACKET_SIZE = 6
+STARTUP_TIME = 2  # in seconds
+
+
+def print_clear():
+    print("\033[H\033[2J", end="")  # ]]
+
+def print_hide_cursor():
+    print("\033[?25l", end="")
+
+
+def print_show_cursor():
+    print("\033[?25h", end="")
+
+
+def progress_bar(start: float, value: float, end: float, bar_length: int, bar_type: str = "BLOCK") -> None:
+    bar_char = ""
+    if bar_type == "BLOCK":
+        bar_char = "█"
+    if bar_type == "HASH":
+        bar_char = "#"
+
+    interval = end - start
+    from_start = value - start
+    mapped_value = from_start / interval
+    perc = int(mapped_value * 100)
+
+    progress_length = int(mapped_value * bar_length)
+
+    print("[" + (bar_char * progress_length) +
+          ("-" * (bar_length - progress_length)) + "] " +
+          str(perc) + "% " + f"{from_start:.2f}s"
+          )
+
+
+def write_with_checkpoint(fd, msg: str) -> None:
+    fd.write(msg)
+    fd.flush()
+    os.fsync(fd.fileno())
 
 
 def find_header(buf: bytes, header: bytes) -> int:
     idx = buf.find(header)
+    if idx + len(header) >= len(buf):
+        return idx
     while buf[idx + len(header)] == header[-1]:
         idx = buf.find(header, idx + 1)
         if idx + len(header) >= len(buf):
@@ -31,7 +68,7 @@ def find_header(buf: bytes, header: bytes) -> int:
     return idx
 
 
-def convert_rh(rh_raw, temp) -> float:
+def convert_rh(rh_raw: int, temp: float) -> float:
     c1 = -2.0468
     c2 = 0.0367
     c3 = -1.5955e-6
@@ -41,16 +78,10 @@ def convert_rh(rh_raw, temp) -> float:
     return (temp - 25) * (t1 + t2 * rh_raw) + rh1
 
 
-def convert_temp(temp_raw) -> float:
+def convert_temp(temp_raw: int) -> float:
     d1 = -39.7
     d2 = 0.01
     return d1 + d2 * temp_raw
-
-
-def reset_arduino(ser: Serial) -> None:
-    ser.setDTR(False)
-    time.sleep(1)
-    ser.setDTR(True)
 
 
 def parse_arguments():
@@ -89,18 +120,15 @@ def parse_arguments():
 
 
 def serial_thread(port: str, sleep_time: int, data_queue: queue.Queue) -> None:
-    global SERIAL_OPEN
     try:
-        ser = serial.Serial(port=port, baudrate=115200, bytesize=EIGHTBITS,
+        ser = Serial(port=port, baudrate=115200, bytesize=EIGHTBITS,
                             parity=PARITY_NONE, stopbits=STOPBITS_ONE)
         if ser.isOpen():
-            SERIAL_OPEN = True
             print("Port opened correctly")
 
-        time.sleep(2)
-
-        # subprocess.run(f"cat -v < {port}", shell=True, stdout=subprocess.PIPE)
-        # print(f"Buffer cleared on {port}")
+        time.sleep(STARTUP_TIME)
+        subprocess.run(f"cat -v < {port}", shell=True, stdout=subprocess.PIPE)
+        print(f"Buffer cleared on {port}")
 
         while not STOP_EVENT.is_set():
             data = ser.read_all()
@@ -111,7 +139,6 @@ def serial_thread(port: str, sleep_time: int, data_queue: queue.Queue) -> None:
     except Exception as e:
         print(f"Serial exception: {e}")
     finally:
-        SERIAL_OPEN = False
         sys.exit(1)
 
 
@@ -130,32 +157,34 @@ def main() -> None:
     file_raw = open(f"./data/{filename}_RAW.txt", "w")
     file_data = open(f"./data/{filename}.txt", "w")
 
-    file_raw.write(f"{dt_fmt}\n")
-    file_data.write("Trigger Data Ora RH_Raw T_Raw RH T\n")
-
-    buf = bytearray()
-    header = b"\xAA\xAA"
-    header_size = len(header)
-
-    trigger, count = 0, 0
-    start = time.time()
-    now = start
-    max_seconds = hours * 3600
+    write_with_checkpoint(file_raw, f"{dt_fmt}\n")
+    write_with_checkpoint(file_data, "Trigger Data Ora RH_Raw T_Raw RH T\n")
 
     thread_serial = threading.Thread(
         target=serial_thread, args=(port, sleep_time, DATA_QUEUE))
+    thread_serial.start()
+
+    data = bytearray()
+    buf = bytearray()
+    header = b"\xAA\xAA"
+
+    trigger, count = 0, 0
+    print(f"Starting in {STARTUP_TIME} seconds...")
+    time.sleep(STARTUP_TIME)
+    start = time.time()
+    now = start
+    max_seconds = hours
+    last_dt_fmt = ""
+    print_hide_cursor()
 
     try:
         while now - start < max_seconds:
+            time.sleep(0.01)  # time-step
             if thread_serial is None or not thread_serial.is_alive():
                 # Create a new thread instance every time it needs to be restarted
                 thread_serial = threading.Thread(
                     target=serial_thread, args=(port, sleep_time, DATA_QUEUE))
                 thread_serial.start()
-                start = time.time()
-                now = start
-
-            count += 1
 
             # Redundant time calculation
             now = time.time()
@@ -163,14 +192,21 @@ def main() -> None:
             dt_now_fmt = dt_now.strftime("%H:%M:%S.%f")[:-3]  # format
 
             try:
-                data = DATA_QUEUE.get(timeout=10 * sleep_time / 1000)
+                data = DATA_QUEUE.get(block=False)
             except queue.Empty:
-                print(f"[{dt_now_fmt}] - No data received.")
+                print_clear()
+                progress_bar(start, now, start + max_seconds, 50, "HASH")
+                print(f"[{last_dt_fmt}] - got {len(data)} bytes: {data.hex()}")
                 continue
 
+            count += 1
+            last_dt_fmt = dt_now_fmt
             buf += data
-            print(f"[{dt_now_fmt}] - got {len(data)} bytes: {data.hex()}")
-            file_raw.write(f"{dt_now_fmt} {count} {data.hex()}\n")
+            print_clear()
+            progress_bar(start, now, start + max_seconds, 50, "HASH")
+            print(f"[{last_dt_fmt}] - got {len(data)} bytes: {data.hex()}")
+            write_with_checkpoint(file_raw, f"{dt_now_fmt} {
+                                  count} {data.hex()}\n")
 
             while len(buf) >= PACKET_SIZE:
                 idx = find_header(buf, header)
@@ -192,8 +228,9 @@ def main() -> None:
                         sleep_time + (sleep_time / quotient)
                     dt_now_date = dt_now.strftime("%Y-%m-%d")
                     dt_now_tod = dt_now.strftime("%H:%M")
-                    file_data.write(f"{trigger:8d} {dt_now_date} {dt_now_tod}:{
-                        (dt_now.second + (milli / 1000)):3.3f} {rh_raw} {t_raw} {rh:.3f} {t:.3f}\n")
+                    write_with_checkpoint(
+                        file_data,
+                        f"{trigger:8d} {dt_now_date} {dt_now_tod}:{(dt_now.second + (milli / 1000)):3.3f} {rh_raw} {t_raw} {rh:.3f} {t:.3f}\n")
 
                     buf = buf[idx + PACKET_SIZE:]
                 else:
@@ -202,6 +239,7 @@ def main() -> None:
         print("Interrupted by user.")
     finally:
         STOP_EVENT.set()
+        print_show_cursor()
 
         if thread_serial is not None:
             thread_serial.join()
